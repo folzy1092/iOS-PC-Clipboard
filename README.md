@@ -5,17 +5,17 @@
 
 ## Возможности
 
-- **iPhone → ПК**: автоматически копирует текст/изображение в буфер Windows
-- **ПК → iPhone**: мониторинг буфера ПК и мгновенная отправка на телефон
-- Веб-интерфейс с историей и ручной отправкой
-- Значок в трее с быстрым управлением
-- Работает только в локальной сети (Wi-Fi)
+- **iPhone → ПК**: автоматически копирует текст и изображения в буфер Windows.
+- **ПК → iPhone**: мониторинг буфера ПК и мгновенная отправка на телефон.
+- Веб-интерфейс с историей и ручной отправкой.
+- Значок в трее с быстрым управлением.
+- Работает только в локальной сети Wi‑Fi.
 
 ## Требования
 
-- Windows 10/11
-- Python 3.9+
-- iPhone с Apple Shortcuts
+- Windows 10/11.
+- Python 3.9+.
+- iPhone с Apple Shortcuts.
 
 ## Установка
 
@@ -35,9 +35,10 @@ run.bat
 pythonw server.pyw
 ```
 
-После запуска сервер появится в трее. Веб-интерфейс: [http://localhost:5000](http://localhost:5000)
+После запуска сервер появится в трее.  
+Веб-интерфейс: [http://localhost:5000](http://localhost:5000)
 
-## Настройка (config.py)
+## Настройка `config.py`
 
 | Параметр | По умолчанию | Описание |
 |---|---|---|
@@ -48,37 +49,53 @@ pythonw server.pyw
 
 ## Структура проекта
 
-```
+```text
 clipboard-server/
 ├── server.pyw          # Основной файл (Flask + SocketIO + трей)
 ├── config.py           # Настройки (пути, порт, дефолты)
 ├── requirements.txt
 ├── run.bat             # Быстрый запуск на Windows
-└── .gitignore
+├── .gitignore
+└── LICENSE
 ```
 
-## Использование с iPhone (Apple Shortcuts)
+## Использование с iPhone
 
-Я создал готовые команды которые можно добавить по ссылке через iCloud
+Я подготовил готовые команды Apple Shortcuts:
 
-From PC: https://www.icloud.com/shortcuts/8963ffa442c84585ac33677b9e8582b0
+- From PC: [iCloud Shortcut](https://www.icloud.com/shortcuts/8963ffa442c84585ac33677b9e8582b0)
+- To PC: [iCloud Shortcut](https://www.icloud.com/shortcuts/4fc06151fea74d95aa7174a320fa3378)
 
-To PC: https://www.icloud.com/shortcuts/4fc06151fea74d95aa7174a320fa3378
+### Настройка адреса сервера
 
-Настройка адреса сервера
-После импорта команд измените адрес в поле URL (вместо DESKTOP-LVUN2I4.local:5000 пропишите данные вашего хоста).
+После импорта команд измените адрес в поле URL на адрес вашего компьютера.
 
-Варианты настройки:
+**Вариант 1 — по имени хоста**  
+Используйте имя ПК в локальной сети, например `http://DESKTOP-NAME.local:5000/update`.  
+Имя хоста можно узнать через команду:
 
-По локальному имени (Рекомендуется): Используйте имя хоста с суффиксом .local (например, http://ИМЯ_ПК.local:5000/update). Этот адрес статичен и не изменится. Узнать имя своего ПК можно через команду hostname в CMD.
+```bash
+hostname
+```
 
-По IP-адресу: Узнать текущий IPv4 можно через команду ipconfig в CMD.
+**Вариант 2 — по IP-адресу**  
+Узнать текущий IPv4 можно через:
 
-Примечание: Настройка через IP-адрес не рекомендуется, так как при динамическом DHCP после перезагрузки роутера IP-адрес компьютера может измениться, что приведет к ошибкам подключения на iPhone. Использование .local решает эту проблему.
+```bash
+ipconfig
+```
+
+Если IP меняется после перезапуска роутера, обновите его в Shortcuts.
+
+## Windows Firewall
 
 На Windows открой порт 5000 в файрволе от имени администратора:
-`netsh advfirewall firewall add rule name="Flask 5000" dir=in action=allow protocol=TCP localport=5000`
+
+```bash
+netsh advfirewall firewall add rule name="Flask 5000" dir=in action=allow protocol=TCP localport=5000
+```
 
 ## Лицензия
 
-GNU General Public License v3.0
+Этот проект распространяется под лицензией GNU General Public License v3.0.  
+См. файл `LICENSE` для полного текста лицензии.
