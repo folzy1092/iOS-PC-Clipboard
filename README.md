@@ -21,7 +21,7 @@
 
 ```bash
 git clone https://github.com/folzy1092/iOS-PC-Clipboard
-cd clipboard-server
+cd iOS-PC-Clipboard
 pip install -r requirements.txt
 ```
 
