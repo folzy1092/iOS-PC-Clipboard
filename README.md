@@ -53,7 +53,8 @@ pythonw server.pyw
 clipboard-server/
 ├── server.pyw          # Основной файл (Flask + SocketIO + трей)
 ├── config.py           # Настройки (пути, порт, дефолты)
-├── requirements.txt
+├── requirements.txt (v1.0.0 New Design)
+├── index.html
 ├── run.bat             # Быстрый запуск на Windows
 ├── .gitignore
 └── LICENSE
