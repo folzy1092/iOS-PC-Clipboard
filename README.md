@@ -76,6 +76,8 @@ To PC: https://www.icloud.com/shortcuts/4fc06151fea74d95aa7174a320fa3378
 
 Примечание: Настройка через IP-адрес не рекомендуется, так как при динамическом DHCP после перезагрузки роутера IP-адрес компьютера может измениться, что приведет к ошибкам подключения на iPhone. Использование .local решает эту проблему.
 
+На Windows открой порт 5000 в файрволе от имени администратора:
+`netsh advfirewall firewall add rule name="Flask 5000" dir=in action=allow protocol=TCP localport=5000`
 
 ## Лицензия
 
