@@ -1,0 +1,6 @@
+flask
+flask-socketio
+pyperclip
+pystray
+pillow
+pywin32
