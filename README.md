@@ -80,7 +80,9 @@ iOS-PC-Clipboard/
 Метод:    POST
 ```
 
-### Шорткат 2 — Получить с ПК на iPhone
+Готовый вариант: [To PC (iCloud)](https://www.icloud.com/shortcuts/f6e1fd9a83f848ab9469bdfe9e5295b9)
+
+### Шорткат 2 — Получить с ПК на iPhone 
 
 Делает GET на `/get-phone` и кладёт ответ в буфер iPhone.
 
@@ -92,6 +94,8 @@ iOS-PC-Clipboard/
 ```
 
 IP компьютера: `ipconfig` в терминале, строка **IPv4**.
+
+Готовый вариант: [From PC (iCloud](https://www.icloud.com/shortcuts/8963ffa442c84585ac33677b9e8582b0)
 
 ---
 
