@@ -18,7 +18,14 @@ import winreg
 import config
 import re
 
-_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if getattr(sys, 'frozen', False):
+    # Если запущен как .exe, используем временную папку PyInstaller
+    _PROJECT_DIR = sys._MEIPASS
+else:
+    # Если запущен как скрипт, используем текущую папку
+    _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 app = Flask(__name__, static_folder=_PROJECT_DIR, static_url_path='')
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
@@ -220,24 +227,31 @@ def decode_single_b64_chunk(b64_str):
     try:
         clean_b64 = b64_str.strip()
         padded_data = clean_b64 + '=' * (-len(clean_b64) % 4)
-        raw_bytes = base64.b64decode(padded_data)
+        raw_bytes = base64.b64decode(padded_data, validate=True)
     except Exception:
         return b64_str.strip()
 
+    # Строгий UTF-8 без игнорирования — нормальный текст и кириллица пройдут здесь
     try:
-        decoded = raw_bytes.decode('utf-8', errors='ignore')
-        try:
-            fixed = decoded.encode('latin1', errors='ignore').decode('utf-8', errors='ignore')
-            if any(chr(1040) <= c <= chr(1103) for c in fixed):
-                decoded = fixed
-        except Exception:
-            pass
-        return decoded
+        return raw_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        pass
+
+    # Бинарные данные (iOS plist, bookmark, RTF...) — ищем URL прямо в байтах
+    url_match = re.search(rb'https?://[^\x00-\x1f\x7f-\x9f\s<>"{}|\\^`]+', raw_bytes)
+    if url_match:
+        return url_match.group(0).decode('ascii', errors='ignore')
+
+    # Фолбек: mojibake-кириллица через latin1->utf-8
+    try:
+        fixed = raw_bytes.decode('latin1').encode('latin1').decode('utf-8', errors='ignore')
+        if any(chr(1040) <= c <= chr(1103) for c in fixed):
+            return fixed
     except Exception:
-        try:
-            return raw_bytes.decode('cp1251', errors='replace')
-        except Exception:
-            return raw_bytes.decode('utf-8', errors='ignore')
+        pass
+
+    # Последний фолбек
+    return raw_bytes.decode('utf-8', errors='ignore')
 
 
 def decode_smart_clipboard(raw_data):
