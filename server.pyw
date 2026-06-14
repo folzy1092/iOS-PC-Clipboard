@@ -16,6 +16,7 @@ import hashlib
 import win32clipboard
 import winreg
 import config
+import re
 
 # Папка проекта = там же где server.pyw
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,7 +32,7 @@ _tray_icon  = None
 state = {
     "pc_text":           "",
     "phone_text":        "",
-    "to_phone_text":     "",   # текст, отправленный вручную на iPhone
+    "to_phone_text":     "",
     "updated_at":        0,
     "auto_to_pc":        config.DEFAULT_AUTO_TO_PC,
     "auto_to_phone":     config.DEFAULT_AUTO_TO_PHONE,
@@ -41,9 +42,9 @@ state = {
     "pc_image":          None,
     "phone_image":       None,
     "last_img_hash":     None,
-    "last_set_img_hash":  None,
-    "last_event":         "",   # phone_sent / phone_sent_img / pc_copied / pc_copied_img / panel_sent / phone_fetched
-    "notify_on_receive":  True,
+    "last_set_img_hash": None,
+    "last_event":        "",
+    "notify_on_receive": config.DEFAULT_NOTIFY_ON_RECEIVE,
 }
 
 
@@ -52,11 +53,11 @@ def load_history():
         try:
             with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                state['history']       = data.get('history',      [])[:50]
-                state['requests']      = data.get('requests',     [])[:50]
-                state['auto_to_pc']       = data.get('auto_to_pc',        config.DEFAULT_AUTO_TO_PC)
-                state['auto_to_phone']    = data.get('auto_to_phone',     config.DEFAULT_AUTO_TO_PHONE)
-                state['notify_on_receive'] = data.get('notify_on_receive', True)
+                state['history']           = data.get('history',      [])[:50]
+                state['requests']          = data.get('requests',     [])[:50]
+                state['auto_to_pc']        = data.get('auto_to_pc',        config.DEFAULT_AUTO_TO_PC)
+                state['auto_to_phone']     = data.get('auto_to_phone',     config.DEFAULT_AUTO_TO_PHONE)
+                state['notify_on_receive'] = data.get('notify_on_receive', config.DEFAULT_NOTIFY_ON_RECEIVE)
         except Exception:
             state['history']  = []
             state['requests'] = []
@@ -66,8 +67,8 @@ def save_history():
     try:
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
             json.dump({
-                'history':      state['history'][:50],
-                'requests':     state['requests'][:50],
+                'history':           state['history'][:50],
+                'requests':          state['requests'][:50],
                 'auto_to_pc':        state['auto_to_pc'],
                 'auto_to_phone':     state['auto_to_phone'],
                 'notify_on_receive': state['notify_on_receive'],
@@ -215,18 +216,84 @@ def index():
     return send_from_directory(_PROJECT_DIR, 'index.html')
 
 
+# ── НОВЫЙ БЛОК УМНОГО ДЕКОДИРОВАНИЯ ДЛЯ ТЕКСТОВ ──────────────────────────
+
+def decode_single_b64_chunk(b64_str):
+    """Декодирует ОДИН кусок Base64, бережно вытаскивая текст."""
+    if not b64_str.strip():
+        return ""
+    try:
+        # Чистим пробелы и добавляем падинг
+        clean_b64 = b64_str.strip()
+        padded_data = clean_b64 + '=' * (-len(clean_b64) % 4)
+        raw_bytes = base64.b64decode(padded_data)
+    except Exception:
+        return b64_str.strip()
+
+    # Пробуем UTF-8
+    try:
+        decoded = raw_bytes.decode('utf-8', errors='ignore')
+        # Проверяем на побитый латиницей UTF-8 (Р”Р°РЅСЏ -> Даня)
+        try:
+            fixed = decoded.encode('latin1', errors='ignore').decode('utf-8', errors='ignore')
+            if any(chr(1040) <= c <= chr(1103) for c in fixed):
+                decoded = fixed
+        except Exception:
+            pass
+        return decoded
+    except Exception:
+        try:
+            return raw_bytes.decode('cp1251', errors='replace')
+        except Exception:
+            return raw_bytes.decode('utf-8', errors='ignore')
+
+
+def decode_smart_clipboard(raw_data):
+    """
+    Разбивает входящие данные по строкам (если iOS склеила несколько объектов через \\n),
+    декодирует каждый кусок отдельно и собирает все 4+ объекта в один сплошной текст.
+    """
+    if not raw_data:
+        return ""
+
+    if isinstance(raw_data, str):
+        # Разбиваем по переносам строк, убираем пустые элементы
+        chunks = [c.strip() for c in raw_data.split('\n') if c.strip()]
+        
+        # Если кусков несколько — обрабатываем каждый отдельно и склеиваем
+        if len(chunks) > 1:
+            processed_chunks = []
+            for chunk in chunks:
+                res = decode_single_b64_chunk(chunk)
+                if res:
+                    processed_chunks.append(res)
+            return "\n\n".join(processed_chunks)
+        else:
+            return decode_single_b64_chunk(raw_data)
+            
+    return str(raw_data)
+
+
 def strip_rtf(text):
     """Убирает RTF-обёртку если iOS прислала RTF вместо plain text."""
     stripped = text.strip()
     if not stripped.startswith('{\\rtf'):
         return text
-    import re
-    # убираем RTF-теги и unicode escapes вида \uXXXX
-    clean = re.sub(r'\\u(\d+)\s?', lambda m: chr(int(m.group(1))), stripped)
-    clean = re.sub(r'\{[^{}]*\}', '', clean)          # вложенные группы
-    clean = re.sub(r'\\[a-zA-Z0-9\-]+\s?', ' ', clean) # команды
-    clean = re.sub(r'[{}\\]', '', clean)               # скобки и слэши
-    clean = re.sub(r'\s+', ' ', clean).strip()
+    # \par и \line -> перенос строки (до удаления команд)
+    clean = re.sub(r'\\par\b\s?', '\n', stripped)
+    clean = re.sub(r'\\line\b\s?', '\n', clean)
+    # unicode escapes: \uXXXX + съедаем пробел-заглушку после числа
+    clean = re.sub(r'\\u(\d+) ?', lambda m: chr(int(m.group(1))), clean)
+    # вложенные группы (шрифты, цвета)
+    clean = re.sub(r'\{[^{}]*\}', '', clean)
+    # оставшиеся RTF-команды
+    clean = re.sub(r'\\[a-zA-Z0-9\-]+\s?', '', clean)
+    # скобки и слэши
+    clean = re.sub(r'[{}\\]', '', clean)
+    # горизонтальные пробелы (не трогаем \n)
+    clean = re.sub(r'[ \t]+', ' ', clean)
+    clean = '\n'.join(line.strip() for line in clean.split('\n'))
+    clean = re.sub(r'\n{3,}', '\n\n', clean).strip()
     return clean if clean else text
 
 
@@ -236,7 +303,7 @@ def update():
     if not req_data or 'data' not in req_data:
         return jsonify({"ok": False, "error": "No data"}), 400
 
-    raw_data    = str(req_data['data'])
+    raw_data = str(req_data['data'])
     # Явный тип от шортката: "text" | "image". Если нет — определяем сами (legacy).
     explicit_type = req_data.get('type')
 
@@ -270,16 +337,14 @@ def update():
                 return jsonify({"ok": False, "error": "Invalid image data"}), 400
 
     # ── ТЕКСТ ────────────────────────────────────────────────────────────────
-    # Декодируем base64 → строка, fallback на raw
-    try:
-        text_content = base64.b64decode(raw_data).decode('utf-8')
-    except Exception:
-        text_content = raw_data
+    
+    # 1. Умная сквозная расшифровка массива Base64-объектов
+    text_content = decode_smart_clipboard(raw_data)
 
-    # Чистим RTF если iOS прислала не plain text
+    # 2. Чистим RTF если iOS прислала не plain text
     text_content = strip_rtf(text_content)
 
-    # Убираем управляющие символы (кроме \n и \t)
+    # 3. Убираем управляющие символы (кроме \n и \t)
     text_content = ''.join(
         ch for ch in text_content
         if ch == '\n' or ch == '\t' or (ord(ch) >= 0x20)
@@ -397,7 +462,7 @@ def monitor_pc_clipboard_text():
                 state['last_event'] = 'pc_copied'
                 add_to_history(cur_text, 'pc', 'text')
                 emit_state()
-            last_text = cur_text
+                last_text = cur_text
         except Exception:
             pass
 
@@ -442,8 +507,9 @@ def run_server():
 
 if __name__ == '__main__':
     load_history()
-
-    threading.Thread(target=run_server,                 daemon=True).start()
+    if config.DEFAULT_AUTOSTART and not is_autostart_enabled():
+            set_autostart(True)
+    threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=monitor_pc_clipboard_text,  daemon=True).start()
     threading.Thread(target=monitor_pc_clipboard_image, daemon=True).start()
 
