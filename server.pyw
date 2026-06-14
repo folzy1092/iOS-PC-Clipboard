@@ -18,7 +18,6 @@ import winreg
 import config
 import re
 
-# Папка проекта = там же где server.pyw
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = Flask(__name__, static_folder=_PROJECT_DIR, static_url_path='')
@@ -215,25 +214,18 @@ def set_autostart(enable: bool):
 def index():
     return send_from_directory(_PROJECT_DIR, 'index.html')
 
-
-# ── НОВЫЙ БЛОК УМНОГО ДЕКОДИРОВАНИЯ ДЛЯ ТЕКСТОВ ──────────────────────────
-
 def decode_single_b64_chunk(b64_str):
-    """Декодирует ОДИН кусок Base64, бережно вытаскивая текст."""
     if not b64_str.strip():
         return ""
     try:
-        # Чистим пробелы и добавляем падинг
         clean_b64 = b64_str.strip()
         padded_data = clean_b64 + '=' * (-len(clean_b64) % 4)
         raw_bytes = base64.b64decode(padded_data)
     except Exception:
         return b64_str.strip()
 
-    # Пробуем UTF-8
     try:
         decoded = raw_bytes.decode('utf-8', errors='ignore')
-        # Проверяем на побитый латиницей UTF-8 (Р”Р°РЅСЏ -> Даня)
         try:
             fixed = decoded.encode('latin1', errors='ignore').decode('utf-8', errors='ignore')
             if any(chr(1040) <= c <= chr(1103) for c in fixed):
@@ -249,18 +241,12 @@ def decode_single_b64_chunk(b64_str):
 
 
 def decode_smart_clipboard(raw_data):
-    """
-    Разбивает входящие данные по строкам (если iOS склеила несколько объектов через \\n),
-    декодирует каждый кусок отдельно и собирает все 4+ объекта в один сплошной текст.
-    """
     if not raw_data:
         return ""
 
     if isinstance(raw_data, str):
-        # Разбиваем по переносам строк, убираем пустые элементы
         chunks = [c.strip() for c in raw_data.split('\n') if c.strip()]
         
-        # Если кусков несколько — обрабатываем каждый отдельно и склеиваем
         if len(chunks) > 1:
             processed_chunks = []
             for chunk in chunks:
@@ -275,22 +261,15 @@ def decode_smart_clipboard(raw_data):
 
 
 def strip_rtf(text):
-    """Убирает RTF-обёртку если iOS прислала RTF вместо plain text."""
     stripped = text.strip()
     if not stripped.startswith('{\\rtf'):
         return text
-    # \par и \line -> перенос строки (до удаления команд)
     clean = re.sub(r'\\par\b\s?', '\n', stripped)
     clean = re.sub(r'\\line\b\s?', '\n', clean)
-    # unicode escapes: \uXXXX + съедаем пробел-заглушку после числа
     clean = re.sub(r'\\u(\d+) ?', lambda m: chr(int(m.group(1))), clean)
-    # вложенные группы (шрифты, цвета)
     clean = re.sub(r'\{[^{}]*\}', '', clean)
-    # оставшиеся RTF-команды
     clean = re.sub(r'\\[a-zA-Z0-9\-]+\s?', '', clean)
-    # скобки и слэши
     clean = re.sub(r'[{}\\]', '', clean)
-    # горизонтальные пробелы (не трогаем \n)
     clean = re.sub(r'[ \t]+', ' ', clean)
     clean = '\n'.join(line.strip() for line in clean.split('\n'))
     clean = re.sub(r'\n{3,}', '\n\n', clean).strip()
@@ -304,10 +283,8 @@ def update():
         return jsonify({"ok": False, "error": "No data"}), 400
 
     raw_data = str(req_data['data'])
-    # Явный тип от шортката: "text" | "image". Если нет — определяем сами (legacy).
     explicit_type = req_data.get('type')
 
-    # ── ИЗОБРАЖЕНИЕ ──────────────────────────────────────────────────────────
     if explicit_type == "image" or explicit_type is None:
         try:
             decoded_bytes = base64.b64decode(raw_data, validate=True)
@@ -336,15 +313,8 @@ def update():
             if explicit_type == "image":
                 return jsonify({"ok": False, "error": "Invalid image data"}), 400
 
-    # ── ТЕКСТ ────────────────────────────────────────────────────────────────
-    
-    # 1. Умная сквозная расшифровка массива Base64-объектов
     text_content = decode_smart_clipboard(raw_data)
-
-    # 2. Чистим RTF если iOS прислала не plain text
     text_content = strip_rtf(text_content)
-
-    # 3. Убираем управляющие символы (кроме \n и \t)
     text_content = ''.join(
         ch for ch in text_content
         if ch == '\n' or ch == '\t' or (ord(ch) >= 0x20)
@@ -440,7 +410,6 @@ def handle_clear_requests():
 
 
 def monitor_pc_clipboard_text():
-    """Мониторинг текста в буфере — каждые 0.3с."""
     last_text = ""
     try:
         last_text = pyperclip.paste()
@@ -468,7 +437,6 @@ def monitor_pc_clipboard_text():
 
 
 def monitor_pc_clipboard_image():
-    """Мониторинг изображений в буфере — каждые 1.5с (дорогая операция)."""
     while True:
         time.sleep(1.5)
         if not state['auto_to_phone']:
