@@ -6,6 +6,7 @@ import threading
 import webbrowser
 import pystray
 import subprocess
+import sys
 from PIL import Image, ImageDraw, ImageGrab
 import json
 import os
@@ -24,6 +25,9 @@ socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 
 HISTORY_FILE = config.HISTORY_FILE
 
+_state_lock = threading.Lock()
+_tray_icon  = None
+
 state = {
     "pc_text":           "",
     "phone_text":        "",
@@ -37,8 +41,9 @@ state = {
     "pc_image":          None,
     "phone_image":       None,
     "last_img_hash":     None,
-    "last_set_img_hash": None,
+    "last_set_img_hash":  None,
     "last_event":         "",   # phone_sent / phone_sent_img / pc_copied / pc_copied_img / panel_sent / phone_fetched
+    "notify_on_receive":  True,
 }
 
 
@@ -47,56 +52,70 @@ def load_history():
         try:
             with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                state['history']  = data.get('history',  [])[:50]
-                state['requests'] = data.get('requests', [])[:50]
+                state['history']       = data.get('history',      [])[:50]
+                state['requests']      = data.get('requests',     [])[:50]
+                state['auto_to_pc']       = data.get('auto_to_pc',        config.DEFAULT_AUTO_TO_PC)
+                state['auto_to_phone']    = data.get('auto_to_phone',     config.DEFAULT_AUTO_TO_PHONE)
+                state['notify_on_receive'] = data.get('notify_on_receive', True)
         except Exception:
             state['history']  = []
             state['requests'] = []
+
 
 def save_history():
     try:
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
             json.dump({
-                'history':  state['history'][:50],
-                'requests': state['requests'][:50],
+                'history':      state['history'][:50],
+                'requests':     state['requests'][:50],
+                'auto_to_pc':        state['auto_to_pc'],
+                'auto_to_phone':     state['auto_to_phone'],
+                'notify_on_receive': state['notify_on_receive'],
             }, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
 
 def add_to_history(text, source, content_type="text"):
     label = text if content_type == "text" else "[изображение]"
     if not label or not label.strip():
         return
-    if state['history'] and state['history'][0].get('text') == label:
-        return
-    state['history'].insert(0, {
-        'text':   label,
-        'time':   time.time(),
-        'source': source,
-        'type':   content_type,
-    })
-    if len(state['history']) > 50:
-        state['history'] = state['history'][:50]
+    with _state_lock:
+        if state['history'] and state['history'][0].get('text') == label:
+            return
+        state['history'].insert(0, {
+            'text':   label,
+            'time':   time.time(),
+            'source': source,
+            'type':   content_type,
+        })
+        if len(state['history']) > 50:
+            state['history'] = state['history'][:50]
     save_history()
 
+
 def add_request(action, content_type, details=""):
-    state['requests'].insert(0, {
-        'action':  action,
-        'type':    content_type,
-        'time':    time.time(),
-        'details': details,
-    })
-    if len(state['requests']) > 50:
-        state['requests'] = state['requests'][:50]
+    with _state_lock:
+        state['requests'].insert(0, {
+            'action':  action,
+            'type':    content_type,
+            'time':    time.time(),
+            'details': details,
+        })
+        if len(state['requests']) > 50:
+            state['requests'] = state['requests'][:50]
     save_history()
+
 
 def img_to_b64(pil_img):
     buf = io.BytesIO()
     pil_img.save(buf, format='PNG')
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
+
 def b64_hash(b64str):
     return hashlib.md5(b64str.encode()).hexdigest()
+
 
 def get_clipboard_image_b64():
     try:
@@ -107,6 +126,7 @@ def get_clipboard_image_b64():
         pass
     return None
 
+
 def set_clipboard_text_win(text):
     try:
         win32clipboard.OpenClipboard()
@@ -115,6 +135,7 @@ def set_clipboard_text_win(text):
         win32clipboard.CloseClipboard()
     except Exception as e:
         print(f"[text] Ошибка записи текста в буфер: {e}")
+
 
 def set_clipboard_image_win(b64_data):
     try:
@@ -137,6 +158,7 @@ def set_clipboard_image_win(b64_data):
     except Exception as e:
         print(f"[img] Ошибка записи в буфер: {e}")
 
+
 def emit_state():
     payload = {k: v for k, v in state.items()
                if k not in ('pc_image', 'phone_image', 'last_set_img_hash')}
@@ -145,8 +167,18 @@ def emit_state():
     payload['last_phone_img_hash'] = b64_hash(state['phone_image']) if state['phone_image'] else None
     socketio.emit('state_update', payload)
 
+
+def tray_notify(message, title="Clipboard"):
+    if _tray_icon and state.get('notify_on_receive', True):
+        try:
+            _tray_icon.notify(message, title)
+        except Exception:
+            pass
+
+
 _REG_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _REG_NAME = "ClipboardServer"
+
 
 def is_autostart_enabled():
     try:
@@ -159,11 +191,12 @@ def is_autostart_enabled():
     except Exception:
         return False
 
+
 def set_autostart(enable: bool):
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY, 0, winreg.KEY_SET_VALUE)
         if enable:
-            script_path = os.path.abspath(__file__)
+            script_path  = os.path.abspath(__file__)
             pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
             cmd = f'"{pythonw_path}" "{script_path}"'
             winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_SZ, cmd)
@@ -177,10 +210,24 @@ def set_autostart(enable: bool):
         print(f"[autostart] Ошибка: {e}")
 
 
-
 @app.route('/')
 def index():
     return send_from_directory(_PROJECT_DIR, 'index.html')
+
+
+def strip_rtf(text):
+    """Убирает RTF-обёртку если iOS прислала RTF вместо plain text."""
+    stripped = text.strip()
+    if not stripped.startswith('{\\rtf'):
+        return text
+    import re
+    # убираем RTF-теги и unicode escapes вида \uXXXX
+    clean = re.sub(r'\\u(\d+)\s?', lambda m: chr(int(m.group(1))), stripped)
+    clean = re.sub(r'\{[^{}]*\}', '', clean)          # вложенные группы
+    clean = re.sub(r'\\[a-zA-Z0-9\-]+\s?', ' ', clean) # команды
+    clean = re.sub(r'[{}\\]', '', clean)               # скобки и слэши
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    return clean if clean else text
 
 
 @app.route('/update', methods=['POST'])
@@ -189,43 +236,50 @@ def update():
     if not req_data or 'data' not in req_data:
         return jsonify({"ok": False, "error": "No data"}), 400
 
-    raw_data = str(req_data['data'])
+    raw_data    = str(req_data['data'])
+    # Явный тип от шортката: "text" | "image". Если нет — определяем сами (legacy).
+    explicit_type = req_data.get('type')
 
-    # попытка декодировать как изображение
-    try:
-        # base64 картинки содержит только допустимые символы и декодируется в валидный PNG/JPEG
-        decoded_bytes = base64.b64decode(raw_data, validate=True)
-        img = Image.open(io.BytesIO(decoded_bytes))
-        img.verify()
+    # ── ИЗОБРАЖЕНИЕ ──────────────────────────────────────────────────────────
+    if explicit_type == "image" or explicit_type is None:
+        try:
+            decoded_bytes = base64.b64decode(raw_data, validate=True)
+            img = Image.open(io.BytesIO(decoded_bytes))
+            img.verify()
 
-        with open(config.CLIPBOARD_IMG_FILE, "wb") as f:
-            f.write(decoded_bytes)
-        state['phone_image'] = base64.b64encode(decoded_bytes).decode('utf-8')
-        state['phone_text']  = ""
-        state['last_type']   = "image"
-        state['updated_at']  = time.time()
+            with open(config.CLIPBOARD_IMG_FILE, "wb") as f:
+                f.write(decoded_bytes)
+            state['phone_image'] = base64.b64encode(decoded_bytes).decode('utf-8')
+            state['phone_text']  = ""
+            state['last_type']   = "image"
+            state['updated_at']  = time.time()
+            state['last_event']  = 'phone_sent_img'
 
-        state['last_event'] = 'phone_sent_img'
-        add_to_history("", 'phone', 'image')
-        add_request('received', 'image', 'Изображение получено с iPhone')
-        emit_state()
+            add_to_history("", 'phone', 'image')
+            add_request('received', 'image', 'Изображение получено с iPhone')
+            emit_state()
+            tray_notify("Получено изображение с iPhone")
 
-        if state['auto_to_pc']:
-            subprocess.run(["powershell", "-Command",
-                            f"Set-Clipboard -Path '{config.CLIPBOARD_IMG_FILE}'"])
-        return jsonify({"ok": True, "type": "image"})
+            if state['auto_to_pc']:
+                subprocess.run(["powershell", "-Command",
+                                f"Set-Clipboard -Path '{config.CLIPBOARD_IMG_FILE}'"])
+            return jsonify({"ok": True, "type": "image"})
 
-    except Exception:
-        pass
+        except Exception:
+            if explicit_type == "image":
+                return jsonify({"ok": False, "error": "Invalid image data"}), 400
 
-    # текст: пробуем base64-декод, затем fallback на raw 
+    # ── ТЕКСТ ────────────────────────────────────────────────────────────────
+    # Декодируем base64 → строка, fallback на raw
     try:
         text_content = base64.b64decode(raw_data).decode('utf-8')
     except Exception:
         text_content = raw_data
 
-    # Убираем только настоящие управляющие символы (0x00-0x08, 0x0B-0x0C, 0x0E-0x1F)
-    # НЕ трогаем \n, \t, обычный текст, скобки, кириллицу и т.д.
+    # Чистим RTF если iOS прислала не plain text
+    text_content = strip_rtf(text_content)
+
+    # Убираем управляющие символы (кроме \n и \t)
     text_content = ''.join(
         ch for ch in text_content
         if ch == '\n' or ch == '\t' or (ord(ch) >= 0x20)
@@ -237,8 +291,8 @@ def update():
     state['phone_text'] = text_content
     state['last_type']  = "text"
     state['updated_at'] = time.time()
-
     state['last_event'] = 'phone_sent'
+
     add_to_history(text_content, 'phone', 'text')
     add_request('received', 'text',
                 f'Текст: {text_content[:50]}{"..." if len(text_content) > 50 else ""}')
@@ -247,6 +301,7 @@ def update():
         set_clipboard_text_win(text_content)
 
     emit_state()
+    tray_notify(f"Получено с iPhone: {text_content[:40]}")
     return jsonify({"ok": True, "type": "text", "content": text_content[:50]})
 
 
@@ -276,6 +331,7 @@ def get_image():
 def get_phone_image():
     return jsonify({"image": state['phone_image']})
 
+
 @socketio.on('connect')
 def handle_connect():
     emit_state()
@@ -285,6 +341,7 @@ def handle_connect():
 def handle_toggle(data):
     if 'auto_to_pc'    in data: state['auto_to_pc']    = bool(data['auto_to_pc'])
     if 'auto_to_phone' in data: state['auto_to_phone'] = bool(data['auto_to_phone'])
+    save_history()
     emit_state()
 
 
@@ -303,18 +360,22 @@ def handle_manual_send(data):
 
 @socketio.on('clear_history')
 def handle_clear_history():
-    state['history'] = []
+    with _state_lock:
+        state['history'] = []
     save_history()
     emit_state()
 
 
 @socketio.on('clear_requests')
 def handle_clear_requests():
-    state['requests'] = []
+    with _state_lock:
+        state['requests'] = []
     save_history()
     emit_state()
 
-def monitor_pc_clipboard():
+
+def monitor_pc_clipboard_text():
+    """Мониторинг текста в буфере — каждые 0.3с."""
     last_text = ""
     try:
         last_text = pyperclip.paste()
@@ -322,10 +383,9 @@ def monitor_pc_clipboard():
         pass
 
     while True:
-        time.sleep(0.5)
+        time.sleep(0.3)
         if not state['auto_to_phone']:
             continue
-
         try:
             cur_text = pyperclip.paste()
             if (cur_text and cur_text != last_text
@@ -341,6 +401,13 @@ def monitor_pc_clipboard():
         except Exception:
             pass
 
+
+def monitor_pc_clipboard_image():
+    """Мониторинг изображений в буфере — каждые 1.5с (дорогая операция)."""
+    while True:
+        time.sleep(1.5)
+        if not state['auto_to_phone']:
+            continue
         try:
             img_b64 = get_clipboard_image_b64()
             if img_b64:
@@ -352,11 +419,12 @@ def monitor_pc_clipboard():
                     state['last_type']     = "image"
                     state['last_img_hash'] = img_hash
                     state['updated_at']    = time.time()
-                    state['last_event'] = 'pc_copied_img'
+                    state['last_event']    = 'pc_copied_img'
                     add_to_history("", 'pc', 'image')
                     emit_state()
         except Exception:
             pass
+
 
 def create_tray_image():
     image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
@@ -375,8 +443,9 @@ def run_server():
 if __name__ == '__main__':
     load_history()
 
-    threading.Thread(target=run_server,           daemon=True).start()
-    threading.Thread(target=monitor_pc_clipboard, daemon=True).start()
+    threading.Thread(target=run_server,                 daemon=True).start()
+    threading.Thread(target=monitor_pc_clipboard_text,  daemon=True).start()
+    threading.Thread(target=monitor_pc_clipboard_image, daemon=True).start()
 
     def open_browser(icon, item):
         webbrowser.open('http://localhost:5000')
@@ -387,19 +456,19 @@ if __name__ == '__main__':
 
     def toggle(key):
         state[key] = not state[key]
+        save_history()
         emit_state()
 
     def restart_app(icon, item):
-        script_path = os.path.abspath(__file__)
+        script_path  = os.path.abspath(__file__)
+        pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+        icon.stop()
         subprocess.Popen(
-            ['pythonw', script_path],
-            shell=True,
+            [pythonw_path, script_path],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(0.5)
-        icon.stop()
         os._exit(0)
 
     def toggle_autostart(icon, item):
@@ -440,6 +509,11 @@ if __name__ == '__main__':
         pystray.MenuItem("Открыть панель",              open_browser),
         pystray.MenuItem("ПК → iPhone вручную",         quick_to_phone),
         pystray.MenuItem("iPhone → буфер ПК вручную",   quick_from_phone),
+        pystray.MenuItem(
+            "Уведомления при получении",
+            lambda i, it: toggle("notify_on_receive"),
+            checked=lambda it: state['notify_on_receive'],
+        ),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
             "Автозагрузка с Windows",
@@ -453,4 +527,5 @@ if __name__ == '__main__':
 
     icon = pystray.Icon("ClipboardServer", create_tray_image(), menu=menu)
     icon.title = "Clipboard Server"
+    _tray_icon = icon
     icon.run()
