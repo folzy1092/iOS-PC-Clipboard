@@ -164,7 +164,8 @@ def set_autostart(enable: bool):
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY, 0, winreg.KEY_SET_VALUE)
         if enable:
             script_path = os.path.abspath(__file__)
-            cmd = f'pythonw "{script_path}"'
+            pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+            cmd = f'"{pythonw_path}" "{script_path}"'
             winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_SZ, cmd)
         else:
             try:
