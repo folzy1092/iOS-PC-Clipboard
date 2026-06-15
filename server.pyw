@@ -203,9 +203,13 @@ def set_autostart(enable: bool):
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY, 0, winreg.KEY_SET_VALUE)
         if enable:
-            script_path  = os.path.abspath(__file__)
-            pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
-            cmd = f'"{pythonw_path}" "{script_path}"'
+            if getattr(sys, 'frozen', False):
+                # .exe — sys.executable и есть наш бинарь
+                cmd = f'"{sys.executable}"'
+            else:
+                script_path  = os.path.abspath(__file__)
+                pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+                cmd = f'"{pythonw_path}" "{script_path}"'
             winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_SZ, cmd)
         else:
             try:
@@ -508,11 +512,15 @@ if __name__ == '__main__':
         emit_state()
 
     def restart_app(icon, item):
-        script_path  = os.path.abspath(__file__)
-        pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+        if getattr(sys, 'frozen', False):
+            args = [sys.executable]
+        else:
+            script_path  = os.path.abspath(__file__)
+            pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+            args = [pythonw_path, script_path]
         icon.stop()
         subprocess.Popen(
-            [pythonw_path, script_path],
+            args,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
