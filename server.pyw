@@ -14,6 +14,7 @@ import io
 import base64
 import hashlib
 import win32clipboard
+import winreg
 import config
 import re
 
@@ -186,10 +187,18 @@ def tray_notify(message, title="Clipboard"):
             pass
 
 
-_TASK_NAME = "ClipboardServer"
+_REG_RUN      = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_REG_APPROVED = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+_REG_NAME     = "ClipboardServer"
+
+# Значение "включено" для StartupApproved\Run
+_APPROVED_ON  = b'\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+
+# Кеш — чтобы не читать реестр при каждом рендере меню
+_autostart_cache: bool | None = None
 
 
-def _get_task_command():
+def _get_autostart_cmd() -> str:
     if getattr(sys, 'frozen', False):
         return f'"{sys.executable}"'
     script_path  = os.path.abspath(__file__)
@@ -197,34 +206,58 @@ def _get_task_command():
     return f'"{pythonw_path}" "{script_path}"'
 
 
-def is_autostart_enabled():
-    result = subprocess.run(
-        ['schtasks', '/query', '/tn', _TASK_NAME],
-        capture_output=True,
-    )
-    return result.returncode == 0
+def is_autostart_enabled() -> bool:
+    global _autostart_cache
+    if _autostart_cache is not None:
+        return _autostart_cache
+
+    # Проверяем Run
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN, 0, winreg.KEY_READ)
+        winreg.QueryValueEx(key, _REG_NAME)
+        winreg.CloseKey(key)
+    except Exception:
+        _autostart_cache = False
+        return False
+
+    # Проверяем что Task Manager не отключил нас в StartupApproved
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_APPROVED, 0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, _REG_NAME)
+        winreg.CloseKey(key)
+        if isinstance(val, bytes) and len(val) >= 1 and val[0] == 0x03:
+            _autostart_cache = False
+            return False
+    except Exception:
+        pass  # Нет записи в StartupApproved = включено
+
+    _autostart_cache = True
+    return True
 
 
 def set_autostart(enable: bool):
+    global _autostart_cache
     try:
         if enable:
-            subprocess.run(
-                [
-                    'schtasks', '/create',
-                    '/tn', _TASK_NAME,
-                    '/tr', _get_task_command(),
-                    '/sc', 'ONLOGON',
-                    '/rl', 'HIGHEST',
-                    '/f',
-                ],
-                check=True,
-                capture_output=True,
-            )
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN, 0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_SZ, _get_autostart_cmd())
+            winreg.CloseKey(key)
+            # Сбрасываем отключение из Task Manager
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_APPROVED, 0, winreg.KEY_SET_VALUE)
+                winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_BINARY, _APPROVED_ON)
+                winreg.CloseKey(key)
+            except Exception:
+                pass
         else:
-            subprocess.run(
-                ['schtasks', '/delete', '/tn', _TASK_NAME, '/f'],
-                capture_output=True,
-            )
+            for reg_path in (_REG_RUN, _REG_APPROVED):
+                try:
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE)
+                    winreg.DeleteValue(key, _REG_NAME)
+                    winreg.CloseKey(key)
+                except FileNotFoundError:
+                    pass
+        _autostart_cache = enable
     except Exception as e:
         print(f"[autostart] Ошибка: {e}")
 
