@@ -14,7 +14,6 @@ import io
 import base64
 import hashlib
 import win32clipboard
-import winreg
 import config
 import re
 
@@ -137,9 +136,11 @@ def get_clipboard_image_b64():
 def set_clipboard_text_win(text):
     try:
         win32clipboard.OpenClipboard()
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
-        win32clipboard.CloseClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+        finally:
+            win32clipboard.CloseClipboard()
     except Exception as e:
         print(f"[text] Ошибка записи текста в буфер: {e}")
 
@@ -153,10 +154,12 @@ def set_clipboard_image_win(b64_data):
             img.save(buf, 'BMP')
             bmp = buf.getvalue()[14:]
             win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardData(win32clipboard.CF_DIB, bmp)
-            win32clipboard.CloseClipboard()
-            state['last_set_img_hash'] = b64_hash(b64_data)
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, bmp)
+                state['last_set_img_hash'] = b64_hash(b64_data)
+            finally:
+                win32clipboard.CloseClipboard()
             print("[img] Изображение скопировано в буфер Windows")
         except Exception:
             with open(config.CLIPBOARD_FILE_DAT, "wb") as f:
@@ -183,40 +186,45 @@ def tray_notify(message, title="Clipboard"):
             pass
 
 
-_REG_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
-_REG_NAME = "ClipboardServer"
+_TASK_NAME = "ClipboardServer"
+
+
+def _get_task_command():
+    if getattr(sys, 'frozen', False):
+        return f'"{sys.executable}"'
+    script_path  = os.path.abspath(__file__)
+    pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+    return f'"{pythonw_path}" "{script_path}"'
 
 
 def is_autostart_enabled():
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY, 0, winreg.KEY_READ)
-        winreg.QueryValueEx(key, _REG_NAME)
-        winreg.CloseKey(key)
-        return True
-    except FileNotFoundError:
-        return False
-    except Exception:
-        return False
+    result = subprocess.run(
+        ['schtasks', '/query', '/tn', _TASK_NAME],
+        capture_output=True,
+    )
+    return result.returncode == 0
 
 
 def set_autostart(enable: bool):
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY, 0, winreg.KEY_SET_VALUE)
         if enable:
-            if getattr(sys, 'frozen', False):
-                # .exe — sys.executable и есть наш бинарь
-                cmd = f'"{sys.executable}"'
-            else:
-                script_path  = os.path.abspath(__file__)
-                pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
-                cmd = f'"{pythonw_path}" "{script_path}"'
-            winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_SZ, cmd)
+            subprocess.run(
+                [
+                    'schtasks', '/create',
+                    '/tn', _TASK_NAME,
+                    '/tr', _get_task_command(),
+                    '/sc', 'ONLOGON',
+                    '/rl', 'HIGHEST',
+                    '/f',
+                ],
+                check=True,
+                capture_output=True,
+            )
         else:
-            try:
-                winreg.DeleteValue(key, _REG_NAME)
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
+            subprocess.run(
+                ['schtasks', '/delete', '/tn', _TASK_NAME, '/f'],
+                capture_output=True,
+            )
     except Exception as e:
         print(f"[autostart] Ошибка: {e}")
 
@@ -392,8 +400,9 @@ def handle_connect():
 
 @socketio.on('toggle_settings')
 def handle_toggle(data):
-    if 'auto_to_pc'    in data: state['auto_to_pc']    = bool(data['auto_to_pc'])
-    if 'auto_to_phone' in data: state['auto_to_phone'] = bool(data['auto_to_phone'])
+    if 'auto_to_pc'        in data: state['auto_to_pc']        = bool(data['auto_to_pc'])
+    if 'auto_to_phone'     in data: state['auto_to_phone']     = bool(data['auto_to_phone'])
+    if 'notify_on_receive' in data: state['notify_on_receive'] = bool(data['notify_on_receive'])
     save_history()
     emit_state()
 
@@ -440,16 +449,16 @@ def monitor_pc_clipboard_text():
             continue
         try:
             cur_text = pyperclip.paste()
-            if (cur_text and cur_text != last_text
-                    and cur_text != state['phone_text']):
-                state['pc_text']    = cur_text
-                state['pc_image']   = None
-                state['last_type']  = "text"
-                state['updated_at'] = time.time()
-                state['last_event'] = 'pc_copied'
-                add_to_history(cur_text, 'pc', 'text')
-                emit_state()
+            if cur_text != last_text:
                 last_text = cur_text
+                if cur_text and cur_text != state['phone_text']:
+                    state['pc_text']    = cur_text
+                    state['pc_image']   = None
+                    state['last_type']  = "text"
+                    state['updated_at'] = time.time()
+                    state['last_event'] = 'pc_copied'
+                    add_to_history(cur_text, 'pc', 'text')
+                    emit_state()
         except Exception:
             pass
 
@@ -494,7 +503,7 @@ def run_server():
 if __name__ == '__main__':
     load_history()
     if config.DEFAULT_AUTOSTART and not is_autostart_enabled():
-            set_autostart(True)
+        set_autostart(True)
     threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=monitor_pc_clipboard_text,  daemon=True).start()
     threading.Thread(target=monitor_pc_clipboard_image, daemon=True).start()
