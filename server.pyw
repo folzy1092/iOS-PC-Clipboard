@@ -38,7 +38,6 @@ _tray_icon  = None
 state = {
     "pc_text":           "",
     "phone_text":        "",
-    "to_phone_text":     "",
     "updated_at":        0,
     "auto_to_pc":        config.DEFAULT_AUTO_TO_PC,
     "auto_to_phone":     config.DEFAULT_AUTO_TO_PHONE,
@@ -124,14 +123,12 @@ def b64_hash(b64str):
     return hashlib.md5(b64str.encode()).hexdigest()
 
 
-def get_clipboard_image_b64():
-    try:
-        img = ImageGrab.grabclipboard()
-        if isinstance(img, Image.Image):
-            return img_to_b64(img)
-    except Exception:
-        pass
-    return None
+def image_fingerprint(pil_img):
+    """Хэш по сырым пикселям (RGB). Не зависит от того, как картинку
+    повторно закодировали в PNG/BMP — нужно, чтобы одна и та же картинка
+    не зацикливалась между буфером ПК и телефоном."""
+    im = pil_img.convert('RGB')
+    return f"{im.size[0]}x{im.size[1]}_{hashlib.md5(im.tobytes()).hexdigest()}"
 
 
 def set_clipboard_text_win(text):
@@ -158,7 +155,7 @@ def set_clipboard_image_win(b64_data):
             try:
                 win32clipboard.EmptyClipboard()
                 win32clipboard.SetClipboardData(win32clipboard.CF_DIB, bmp)
-                state['last_set_img_hash'] = b64_hash(b64_data)
+                state['last_set_img_hash'] = image_fingerprint(img)
             finally:
                 win32clipboard.CloseClipboard()
             print("[img] Изображение скопировано в буфер Windows")
@@ -171,11 +168,12 @@ def set_clipboard_image_win(b64_data):
 
 
 def emit_state():
-    payload = {k: v for k, v in state.items()
-               if k not in ('pc_image', 'phone_image', 'last_set_img_hash')}
-    payload['has_pc_image']        = state['pc_image']    is not None
-    payload['has_phone_image']     = state['phone_image'] is not None
-    payload['last_phone_img_hash'] = b64_hash(state['phone_image']) if state['phone_image'] else None
+    with _state_lock:
+        payload = {k: v for k, v in state.items()
+                   if k not in ('pc_image', 'phone_image', 'last_set_img_hash')}
+        payload['has_pc_image']        = state['pc_image']    is not None
+        payload['has_phone_image']     = state['phone_image'] is not None
+        payload['last_phone_img_hash'] = b64_hash(state['phone_image']) if state['phone_image'] else None
     socketio.emit('state_update', payload)
 
 
@@ -194,9 +192,6 @@ _REG_NAME     = "ClipboardServer"
 # Значение "включено" для StartupApproved\Run
 _APPROVED_ON  = b'\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
 
-# Кеш — чтобы не читать реестр при каждом рендере меню
-_autostart_cache: bool | None = None
-
 
 def _get_autostart_cmd() -> str:
     if getattr(sys, 'frozen', False):
@@ -207,17 +202,12 @@ def _get_autostart_cmd() -> str:
 
 
 def is_autostart_enabled() -> bool:
-    global _autostart_cache
-    if _autostart_cache is not None:
-        return _autostart_cache
-
     # Проверяем Run
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN, 0, winreg.KEY_READ)
         winreg.QueryValueEx(key, _REG_NAME)
         winreg.CloseKey(key)
     except Exception:
-        _autostart_cache = False
         return False
 
     # Проверяем что Task Manager не отключил нас в StartupApproved
@@ -226,17 +216,14 @@ def is_autostart_enabled() -> bool:
         val, _ = winreg.QueryValueEx(key, _REG_NAME)
         winreg.CloseKey(key)
         if isinstance(val, bytes) and len(val) >= 1 and val[0] == 0x03:
-            _autostart_cache = False
             return False
     except Exception:
         pass  # Нет записи в StartupApproved = включено
 
-    _autostart_cache = True
     return True
 
 
 def set_autostart(enable: bool):
-    global _autostart_cache
     try:
         if enable:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN, 0, winreg.KEY_SET_VALUE)
@@ -257,7 +244,6 @@ def set_autostart(enable: bool):
                     winreg.CloseKey(key)
                 except FileNotFoundError:
                     pass
-        _autostart_cache = enable
     except Exception as e:
         print(f"[autostart] Ошибка: {e}")
 
@@ -267,14 +253,18 @@ def index():
     return send_from_directory(_PROJECT_DIR, 'index.html')
 
 def decode_single_b64_chunk(b64_str):
-    if not b64_str.strip():
+    clean_b64 = b64_str.strip()
+    if not clean_b64:
         return ""
+    # Обычная ссылка/URL никогда не является base64 (символ ':' вне алфавита),
+    # поэтому не трогаем её — иначе ломаем сценарий «скинул ссылку себе на ПК».
+    if '://' in clean_b64:
+        return clean_b64
     try:
-        clean_b64 = b64_str.strip()
         padded_data = clean_b64 + '=' * (-len(clean_b64) % 4)
         raw_bytes = base64.b64decode(padded_data, validate=True)
     except Exception:
-        return b64_str.strip()
+        return clean_b64
 
     # Строгий UTF-8 без игнорирования — нормальный текст и кириллица пройдут здесь
     try:
@@ -352,11 +342,23 @@ def update():
 
             with open(config.CLIPBOARD_IMG_FILE, "wb") as f:
                 f.write(decoded_bytes)
-            state['phone_image'] = base64.b64encode(decoded_bytes).decode('utf-8')
-            state['phone_text']  = ""
-            state['last_type']   = "image"
-            state['updated_at']  = time.time()
-            state['last_event']  = 'phone_sent_img'
+
+            phone_image = base64.b64encode(decoded_bytes).decode('utf-8')
+            # Заранее запоминаем «отпечаток» картинки, чтобы монитор буфера ПК
+            # не отправил её обратно на телефон (защита от эхо-петли).
+            try:
+                fingerprint = image_fingerprint(Image.open(io.BytesIO(decoded_bytes)))
+            except Exception:
+                fingerprint = None
+
+            with _state_lock:
+                state['phone_image'] = phone_image
+                state['phone_text']  = ""
+                state['last_type']   = "image"
+                state['updated_at']  = time.time()
+                state['last_event']  = 'phone_sent_img'
+                if fingerprint:
+                    state['last_set_img_hash'] = fingerprint
 
             add_to_history("", 'phone', 'image')
             add_request('received', 'image', 'Изображение получено с iPhone')
@@ -364,8 +366,12 @@ def update():
             tray_notify("Получено изображение с iPhone")
 
             if state['auto_to_pc']:
-                subprocess.run(["powershell", "-Command",
-                                f"Set-Clipboard -Path '{config.CLIPBOARD_IMG_FILE}'"])
+                # Нативная запись в буфер в фоне — не блокирует ответ телефону.
+                threading.Thread(
+                    target=set_clipboard_image_win,
+                    args=(phone_image,),
+                    daemon=True,
+                ).start()
             return jsonify({"ok": True, "type": "image"})
 
         except Exception:
@@ -382,10 +388,11 @@ def update():
     if not text_content:
         return jsonify({"ok": False, "error": "Empty text"}), 400
 
-    state['phone_text'] = text_content
-    state['last_type']  = "text"
-    state['updated_at'] = time.time()
-    state['last_event'] = 'phone_sent'
+    with _state_lock:
+        state['phone_text'] = text_content
+        state['last_type']  = "text"
+        state['updated_at'] = time.time()
+        state['last_event'] = 'phone_sent'
 
     add_to_history(text_content, 'phone', 'text')
     add_request('received', 'text',
@@ -401,15 +408,22 @@ def update():
 
 @app.route('/get-phone')
 def get_phone():
-    if state['pc_image'] and state['last_type'] == "image":
-        state['last_event'] = 'phone_fetched_img'
+    with _state_lock:
+        pc_image = state['pc_image']
+        pc_text  = state['pc_text']
+        is_image = bool(pc_image) and state['last_type'] == "image"
+        if is_image:
+            state['last_event'] = 'phone_fetched_img'
+        elif pc_text:
+            state['last_event'] = 'phone_fetched'
+
+    if is_image:
         add_request('sent', 'image', 'ПК → iPhone: изображение из буфера')
         emit_state()
-        return jsonify({"type": "image", "data": state['pc_image']})
+        return jsonify({"type": "image", "data": pc_image})
 
-    current_text = state['pc_text'] if state['pc_text'] else "Буфер обмена пуст"
-    if state['pc_text']:
-        state['last_event'] = 'phone_fetched'
+    current_text = pc_text if pc_text else "Буфер обмена пуст"
+    if pc_text:
         add_request('sent', 'text',
                     f'ПК → iPhone: {current_text[:40]}{"..." if len(current_text) > 40 else ""}')
         emit_state()
@@ -433,9 +447,10 @@ def handle_connect():
 
 @socketio.on('toggle_settings')
 def handle_toggle(data):
-    if 'auto_to_pc'        in data: state['auto_to_pc']        = bool(data['auto_to_pc'])
-    if 'auto_to_phone'     in data: state['auto_to_phone']     = bool(data['auto_to_phone'])
-    if 'notify_on_receive' in data: state['notify_on_receive'] = bool(data['notify_on_receive'])
+    with _state_lock:
+        if 'auto_to_pc'        in data: state['auto_to_pc']        = bool(data['auto_to_pc'])
+        if 'auto_to_phone'     in data: state['auto_to_phone']     = bool(data['auto_to_phone'])
+        if 'notify_on_receive' in data: state['notify_on_receive'] = bool(data['notify_on_receive'])
     save_history()
     emit_state()
 
@@ -444,11 +459,13 @@ def handle_toggle(data):
 def handle_manual_send(data):
     if 'text' in data:
         text = str(data['text'])
-        state['pc_text']    = text
-        state['pc_image']   = None
-        state['last_type']  = "text"
-        state['updated_at'] = time.time()
-        state['last_event'] = 'panel_sent'
+        with _state_lock:
+            state['pc_text']       = text
+            state['pc_image']      = None
+            state['last_img_hash'] = None
+            state['last_type']     = "text"
+            state['updated_at']    = time.time()
+            state['last_event']    = 'panel_sent'
         add_to_history(text, 'pc', 'text')
         emit_state()
 
@@ -485,11 +502,13 @@ def monitor_pc_clipboard_text():
             if cur_text != last_text:
                 last_text = cur_text
                 if cur_text and cur_text != state['phone_text']:
-                    state['pc_text']    = cur_text
-                    state['pc_image']   = None
-                    state['last_type']  = "text"
-                    state['updated_at'] = time.time()
-                    state['last_event'] = 'pc_copied'
+                    with _state_lock:
+                        state['pc_text']       = cur_text
+                        state['pc_image']      = None
+                        state['last_img_hash'] = None
+                        state['last_type']     = "text"
+                        state['updated_at']    = time.time()
+                        state['last_event']    = 'pc_copied'
                     add_to_history(cur_text, 'pc', 'text')
                     emit_state()
         except Exception:
@@ -502,19 +521,25 @@ def monitor_pc_clipboard_image():
         if not state['auto_to_phone']:
             continue
         try:
-            img_b64 = get_clipboard_image_b64()
-            if img_b64:
-                img_hash = b64_hash(img_b64)
-                if (img_hash != state.get('last_set_img_hash')
-                        and img_hash != state.get('last_img_hash')):
-                    state['pc_image']      = img_b64
-                    state['pc_text']       = ""
-                    state['last_type']     = "image"
-                    state['last_img_hash'] = img_hash
-                    state['updated_at']    = time.time()
-                    state['last_event']    = 'pc_copied_img'
-                    add_to_history("", 'pc', 'image')
-                    emit_state()
+            img = ImageGrab.grabclipboard()
+            if not isinstance(img, Image.Image):
+                continue
+            # «Отпечаток» по пикселям переживает повторное PNG/BMP-кодирование,
+            # поэтому картинка, только что положенная в буфер с телефона, не
+            # уйдёт обратно на телефон (нет эхо-петли).
+            fp = image_fingerprint(img)
+            if fp == state.get('last_set_img_hash') or fp == state.get('last_img_hash'):
+                continue
+            img_b64 = img_to_b64(img)
+            with _state_lock:
+                state['pc_image']      = img_b64
+                state['pc_text']       = ""
+                state['last_type']     = "image"
+                state['last_img_hash'] = fp
+                state['updated_at']    = time.time()
+                state['last_event']    = 'pc_copied_img'
+            add_to_history("", 'pc', 'image')
+            emit_state()
         except Exception:
             pass
 
@@ -549,7 +574,8 @@ if __name__ == '__main__':
         os._exit(0)
 
     def toggle(key):
-        state[key] = not state[key]
+        with _state_lock:
+            state[key] = not state[key]
         save_history()
         emit_state()
 
@@ -576,10 +602,12 @@ if __name__ == '__main__':
         try:
             t = pyperclip.paste()
             if t:
-                state['pc_text']    = t
-                state['pc_image']   = None
-                state['last_type']  = "text"
-                state['updated_at'] = time.time()
+                with _state_lock:
+                    state['pc_text']       = t
+                    state['pc_image']      = None
+                    state['last_img_hash'] = None
+                    state['last_type']     = "text"
+                    state['updated_at']    = time.time()
                 add_to_history(t, 'pc', 'text')
                 emit_state()
         except Exception:
