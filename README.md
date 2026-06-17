@@ -156,4 +156,4 @@ GNU General Public License v3.0
 
 ## Star History
 
-[![Star History Chart](https://www.star-history.com/?repos=folzy1092%2FiOS-PC-Clipboard&type=date&legend=bottom-right)](https://www.star-history.com/?repos=folzy1092%2FiOS-PC-Clipboard&type=date&legend=bottom-right)
+[![Star History Chart](https://api.star-history.com/chart?repos=folzy1092/iOS-PC-Clipboard&type=date&legend=bottom-right)](https://www.star-history.com/?repos=folzy1092%2FiOS-PC-Clipboard&type=date&legend=bottom-right)
