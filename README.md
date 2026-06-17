@@ -155,4 +155,4 @@ GNU General Public License v3.0
 
 
 
-https://www.star-history.com/?repos=folzy1092%2FiOS-PC-Clipboard&type=date&legend=top-left
+[![Star History Chart](https://www.star-history.com/?repos=folzy1092%2FiOS-PC-Clipboard&type=date&legend=top-left)
